@@ -18,7 +18,7 @@ ViewpointPlanner::ViewpointPlanner(ros::NodeHandle &nh, ros::NodeHandle &nhp, co
   nh(nh), nhp(nhp),
   planningTree(new octomap_vpp::RoiOcTree(tree_resolution)),
   map_frame(map_frame),
-  ws_frame(ws_frame),
+  ws_frame("arm_base_link"),
   workspaceTree(nullptr),
   samplingTree(nullptr),
   evaluator(nullptr),
@@ -49,6 +49,7 @@ ViewpointPlanner::ViewpointPlanner(ros::NodeHandle &nh, ros::NodeHandle &nhp, co
   shutdown_planner(false),
   random_engine(std::random_device{}())
 {
+  // ws_frame = "arm_base_link";
 
   std::stringstream fDateTime;
   const boost::posix_time::ptime curDateTime = boost::posix_time::second_clock::local_time();
@@ -82,6 +83,10 @@ ViewpointPlanner::ViewpointPlanner(ros::NodeHandle &nh, ros::NodeHandle &nhp, co
 
   resetMoveitOctomapClient = nh.serviceClient<std_srvs::Empty>("/clear_octomap");
   resetVoxbloxMapClient = nh.serviceClient<std_srvs::Empty>("/voxblox_node/clear_map");
+
+  move_arm_client_ = nh.serviceClient<xarm6_planner::MoveXarmTrigger>("move_xarm");
+  arm_pose_.position.x = 0.0;
+  arm_pose_.position.y = -0.6;
 
   setPoseReferenceFrame(map_frame);
 
@@ -204,6 +209,8 @@ ViewpointPlanner::ViewpointPlanner(ros::NodeHandle &nh, ros::NodeHandle &nhp, co
 
   if (update_planning_tree)
     roiSub = nh.subscribe("/detect_roi/results", 1, &ViewpointPlanner::registerPointcloudWithRoi, this);
+
+    arm_pose_sub_ = nh.subscribe("arm_pose", 1, &ViewpointPlanner::ArmPoseCallback, this);
 
   if (initialize_evaluator)
   {
@@ -731,6 +738,12 @@ void ViewpointPlanner::registerPointcloudWithRoi(const ros::MessageEvent<pointcl
   #endif
 }*/
 
+
+void ViewpointPlanner::ArmPoseCallback(const geometry_msgs::Pose& msg)
+{
+  arm_pose_ = msg;
+}
+
 octomap::point3d ViewpointPlanner::sampleRandomPointOnSphere(const octomap::point3d &center, double radius)
 {
   static std::normal_distribution<double> distribution(0.0, 1.0);
@@ -1254,11 +1267,15 @@ geometry_msgs::Pose ViewpointPlanner::transformToMapFrame(const geometry_msgs::P
 octomap::point3d ViewpointPlanner::transformToWorkspace(const octomap::point3d &p)
 {
   if (map_frame == ws_frame)
+  {
+    // ROS_INFO("map_frame == ws_frame, map_frame si %s, ws_frame is %s", map_frame.c_str(), ws_frame.c_str());
     return p;
+  }
 
   geometry_msgs::TransformStamped trans;
   try
   {
+    // ROS_INFO_STREAM("got transfomr !!!!!!!!!!!!!!!!!!!!!!");
     trans = tfBuffer.lookupTransform(ws_frame, map_frame, ros::Time(0));
   }
   catch (const tf2::TransformException &e)
@@ -2171,11 +2188,53 @@ bool ViewpointPlanner::randomizePlantPositions(const geometry_msgs::Point &min, 
   return true;
 }
 
+bool ViewpointPlanner::moveArmCall(const double x_, const double y_)
+{
+  move_arm_srv_.request.pose.position.x = x_;
+  move_arm_srv_.request.pose.position.y = y_;
+  move_arm_srv_.request.pose.position.z = 0.0;
+
+  tf2::Quaternion q;
+  y_ < 0 ? q.setRPY(0, 0, 0.0) : q.setRPY(0, 0, M_PI);
+  q = q.normalize();
+
+  move_arm_srv_.request.pose.orientation.x = q.x();
+  move_arm_srv_.request.pose.orientation.y = q.y();
+  move_arm_srv_.request.pose.orientation.z = q.z();
+  move_arm_srv_.request.pose.orientation.w = q.w();
+
+  if (move_arm_client_.call(move_arm_srv_))
+  {
+    // ROS_INFO("move xarm success!!");
+  }
+  else
+  {
+    ROS_ERROR("Failed to call service move_xarm");
+
+    return false;
+  }
+
+  return true;
+}
+
 void ViewpointPlanner::plannerLoop()
 {
   for (ros::Rate rate(100); ros::ok() && !shutdown_planner; rate.sleep())
   {
     plannerLoopOnce();
+
+    double x_posis = arm_pose_.position.x + 0.3;
+    double y_posis = arm_pose_.position.y;
+
+    if (x_posis > 0.6) 
+    {
+      x_posis = -0.6;
+      y_posis = -y_posis;
+    }
+
+    ROS_INFO("call move arm");
+    if (moveArmCall(x_posis, y_posis))
+      ros::Duration(0.1).sleep();
   }
 }
 
@@ -2282,7 +2341,7 @@ bool ViewpointPlanner::plannerLoopOnce()
     return a.utility < b.utility;
   };
 
-  // ROI sampling
+  // ROI sampling サンプリング
   if (mode == SAMPLE_ROI_CONTOURS || (mode == SAMPLE_AUTOMATIC && roi_sample_mode == SAMPLE_ROI_CONTOURS))
   {
     std::unique_ptr<SamplerBase> sampler = createSampler(SamplerType::ROI_CONTOUR_SAMPLER, this, camOrig, camQuat, roiMaxSamples, roiUtil);
@@ -2345,6 +2404,8 @@ bool ViewpointPlanner::plannerLoopOnce()
   //std::make_heap(borderVps.begin(), borderVps.end(), vpComp);
   //std::make_heap(contourVps.begin(), contourVps.end(), vpComp);
 
+  // viewpointの選択
+
   if (!execute_plan)
   {
     timeLogger.endLoop();
@@ -2376,6 +2437,8 @@ bool ViewpointPlanner::plannerLoopOnce()
   }();
 
   timeLogger.saveTime(TimeLogger::VIEWPOINTS_SELECTED);
+
+  // execute
 
   bool move_success = false;
   for (/*std::make_heap(nextViewpoints.begin(), nextViewpoints.end(), vpComp)*/; !nextViewpoints.empty(); std::pop_heap(nextViewpoints.begin(), nextViewpoints.end(), vpComp), nextViewpoints.pop_back())

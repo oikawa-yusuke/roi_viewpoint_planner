@@ -38,6 +38,8 @@
 #include <algorithm>
 #include <unordered_set>
 
+#include "xarm6_planner/MoveXarmTrigger.h"
+
 #if defined(__GNUC__ ) && (__GNUC__  < 7) // GCC < 7 has sample only in experimental namespace
 #include <experimental/algorithm>
 namespace std {
@@ -137,6 +139,9 @@ private:
   ros::ServiceClient resetVoxbloxMapClient;
   std_srvs::Empty emptySrv;
 
+  ros::ServiceClient move_arm_client_;
+  xarm6_planner::MoveXarmTrigger move_arm_srv_;
+
   std::string bag_write_filename;
   std::string bag_final_filename;
   rosbag::Bag plannerBag;
@@ -156,6 +161,7 @@ private:
   //message_filters::Synchronizer<DetsSyncPolicy> syncDets(DetsSyncPolicy(50), pcGlobalSub, detectionsSub);
 
   ros::Subscriber roiSub;
+  ros::Subscriber arm_pose_sub_;
 
   moveit::planning_interface::MoveGroupInterface manipulator_group;
 
@@ -277,6 +283,8 @@ public:
   size_t roiMaxSamples, explMaxSamples;
   UtilityType roiUtil, explUtil;
 
+  geometry_msgs::Pose arm_pose_;
+
   // Planner parameters end
 
   ViewpointPlanner(ros::NodeHandle &nh, ros::NodeHandle &nhp, const std::string &wstree_file, const std::string &sampling_tree_file, double tree_resolution,
@@ -327,6 +335,8 @@ public:
   void publishMap();
 
   void registerPointcloudWithRoi(const ros::MessageEvent<pointcloud_roi_msgs::PointcloudWithRoi const> &event);
+
+  void ArmPoseCallback(const geometry_msgs::Pose& msg);
 
   //void registerNewScan(const sensor_msgs::PointCloud2ConstPtr &pc_msg);
 
@@ -423,6 +433,8 @@ public:
   void resetOctomap();
 
   bool randomizePlantPositions(const geometry_msgs::Point &min, const geometry_msgs::Point &max, double min_dist);
+
+  bool moveArmCall(const double x_, const double y_);
 
   void plannerLoop();
 

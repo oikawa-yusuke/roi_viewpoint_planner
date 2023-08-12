@@ -70,6 +70,7 @@
   <depend>roi_viewpoint_planner_msgs</depend>
   <depend>rosbag_storage</depend>
   <depend>rvp_evaluation</depend>
+  <depend>xarm6_planner</depend>
   <!--depend>image_geometry</depend>
   <depend>instance_segmentation_msgs</depend>
   <depend>trolley_remote</depend-->

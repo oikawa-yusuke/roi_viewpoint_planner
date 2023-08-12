@@ -25,6 +25,7 @@ set (CATKIN_DEPENDENCIES
     roi_viewpoint_planner_msgs
     rosbag_storage
     rvp_evaluation
+    xarm6_planner
     #image_geometry
     #instance_segmentation_msgs
     #trolley_remote
