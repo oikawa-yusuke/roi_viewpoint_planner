@@ -210,7 +210,8 @@ ViewpointPlanner::ViewpointPlanner(ros::NodeHandle &nh, ros::NodeHandle &nhp, co
   if (update_planning_tree)
     roiSub = nh.subscribe("/detect_roi/results", 1, &ViewpointPlanner::registerPointcloudWithRoi, this);
 
-    arm_pose_sub_ = nh.subscribe("arm_pose", 1, &ViewpointPlanner::ArmPoseCallback, this);
+  arm_pose_sub_ = nh.subscribe("arm_pose", 1, &ViewpointPlanner::ArmPoseCallback, this);
+  view_pose_sub_ = nh.subscribe("view_pose_array", 1, &ViewpointPlanner::ViewPoseCallback, this);
 
   if (initialize_evaluator)
   {
@@ -742,6 +743,44 @@ void ViewpointPlanner::registerPointcloudWithRoi(const ros::MessageEvent<pointcl
 void ViewpointPlanner::ArmPoseCallback(const geometry_msgs::Pose& msg)
 {
   arm_pose_ = msg;
+}
+
+void ViewpointPlanner::ViewPoseCallback(const view_pose_msgs::ViewPoseArray& msg)
+{
+  target_poses_ = SortViewpose(msg);
+}
+
+view_pose_msgs::ViewPoseArray ViewpointPlanner::SortViewpose(const view_pose_msgs::ViewPoseArray& msg)
+{
+  double x_min = arm_pose_.position.x - 0.15;
+  double x_max = arm_pose_.position.x + 0.15;
+
+  // pose の整形 //
+  view_pose_msgs::ViewPoseArray viewPoseArray;
+
+  for (int j=0; j < msg.poses.size(); j++)
+  {
+    // pose
+    view_pose_msgs::ViewPose pose;
+    pose = msg.poses[j];
+
+    if (pose.view_pose.position.x > x_min && pose.view_pose.position.x <= x_max) 
+    {
+      viewPoseArray.poses.push_back(pose);
+    }
+  }
+  
+  // cout << " -- z座標でで降順にソート -- " << endl;
+  sort(viewPoseArray.poses.begin(),viewPoseArray.poses.end(),[](const view_pose_msgs::ViewPose &alpha,const view_pose_msgs::ViewPose &beta){return alpha.view_pose.position.z > beta.view_pose.position.z;});
+
+  // 確認のための表示
+  ROS_INFO("arm target points");
+  for (size_t j = 0; j < viewPoseArray.poses.size(); j++)
+  {
+    ROS_INFO("x y z %f %f %f", viewPoseArray.poses[j].view_pose.position.x, viewPoseArray.poses[j].view_pose.position.y, viewPoseArray.poses[j].view_pose.position.z);
+  }
+
+  return viewPoseArray;
 }
 
 octomap::point3d ViewpointPlanner::sampleRandomPointOnSphere(const octomap::point3d &center, double radius)

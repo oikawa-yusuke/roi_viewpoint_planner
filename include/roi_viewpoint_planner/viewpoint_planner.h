@@ -39,6 +39,8 @@
 #include <unordered_set>
 
 #include "xarm6_planner/MoveXarmTrigger.h"
+#include <view_pose_msgs/ViewPose.h>
+#include <view_pose_msgs/ViewPoseArray.h>
 
 #if defined(__GNUC__ ) && (__GNUC__  < 7) // GCC < 7 has sample only in experimental namespace
 #include <experimental/algorithm>
@@ -162,6 +164,9 @@ private:
 
   ros::Subscriber roiSub;
   ros::Subscriber arm_pose_sub_;
+  ros::Subscriber view_pose_sub_;
+
+  view_pose_msgs::ViewPoseArray target_poses_;
 
   moveit::planning_interface::MoveGroupInterface manipulator_group;
 
@@ -337,6 +342,10 @@ public:
   void registerPointcloudWithRoi(const ros::MessageEvent<pointcloud_roi_msgs::PointcloudWithRoi const> &event);
 
   void ArmPoseCallback(const geometry_msgs::Pose& msg);
+
+  void ViewPoseCallback(const view_pose_msgs::ViewPoseArray& msg);
+
+  view_pose_msgs::ViewPoseArray SortViewpose(const view_pose_msgs::ViewPoseArray& msg);
 
   //void registerNewScan(const sensor_msgs::PointCloud2ConstPtr &pc_msg);
 
