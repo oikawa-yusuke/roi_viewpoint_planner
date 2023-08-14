@@ -41,6 +41,7 @@
 #include "xarm6_planner/MoveXarmTrigger.h"
 #include <view_pose_msgs/ViewPose.h>
 #include <view_pose_msgs/ViewPoseArray.h>
+#include "bunch_point_manager/TreateBunch.h"
 
 #if defined(__GNUC__ ) && (__GNUC__  < 7) // GCC < 7 has sample only in experimental namespace
 #include <experimental/algorithm>
@@ -141,8 +142,13 @@ private:
   ros::ServiceClient resetVoxbloxMapClient;
   std_srvs::Empty emptySrv;
 
+  // move arm service
   ros::ServiceClient move_arm_client_;
   xarm6_planner::MoveXarmTrigger move_arm_srv_;
+
+  // treate bunch sdrvice
+  ros::ServiceClient treate_client_;
+  bunch_point_manager::TreateBunch treate_srv_;
 
   std::string bag_write_filename;
   std::string bag_final_filename;
@@ -345,6 +351,8 @@ public:
 
   void ViewPoseCallback(const view_pose_msgs::ViewPoseArray& msg);
 
+  void execute();
+
   view_pose_msgs::ViewPoseArray SortViewpose(const view_pose_msgs::ViewPoseArray& msg);
 
   //void registerNewScan(const sensor_msgs::PointCloud2ConstPtr &pc_msg);
@@ -444,6 +452,8 @@ public:
   bool randomizePlantPositions(const geometry_msgs::Point &min, const geometry_msgs::Point &max, double min_dist);
 
   bool moveArmCall(const double x_, const double y_);
+
+  bool TreateCall(const geometry_msgs::Point target_point);
 
   void plannerLoop();
 

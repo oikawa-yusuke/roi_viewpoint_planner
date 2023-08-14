@@ -248,7 +248,7 @@ int main(int argc, char **argv)
   std::vector<double> joint_start_values;
   if(nhp.getParam("initial_joint_values", joint_start_values))
   {
-    planner->moveToState(joint_start_values, false, false);
+    // planner->moveToState(joint_start_values, false, false);
   }
   else
   {

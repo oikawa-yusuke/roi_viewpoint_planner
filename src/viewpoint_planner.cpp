@@ -88,6 +88,8 @@ ViewpointPlanner::ViewpointPlanner(ros::NodeHandle &nh, ros::NodeHandle &nhp, co
   arm_pose_.position.x = 0.0;
   arm_pose_.position.y = -0.6;
 
+  treate_client_ = nh.serviceClient<bunch_point_manager::TreateBunch>("bunch_point_manager/treate_bunch");
+
   setPoseReferenceFrame(map_frame);
 
   // Load workspace
@@ -781,6 +783,74 @@ view_pose_msgs::ViewPoseArray ViewpointPlanner::SortViewpose(const view_pose_msg
   }
 
   return viewPoseArray;
+}
+
+void ViewpointPlanner::execute()
+{
+  moveit::planning_interface::MoveGroupInterface::Plan plan;
+  moveit::planning_interface::MoveItErrorCode ret;
+
+  view_pose_msgs::ViewPoseArray target_poses;
+
+  for (auto pose : target_poses_.poses)
+  {
+    target_poses.poses.push_back(pose);
+  }
+
+  double x_min = arm_pose_.position.x - 0.15;
+  double x_max = arm_pose_.position.x + 0.15;
+
+  for (int j=0; j < target_poses.poses.size(); j++)
+  {
+    // set target pose
+    geometry_msgs::PoseStamped pose;
+    view_pose_msgs::ViewPose view_pose;
+    pose.header.frame_id = "world";
+    pose.header.stamp = ros::Time::now();
+    pose.pose = target_poses.poses[j].view_pose;
+    view_pose = target_poses.poses[j];
+
+    ROS_INFO("planning trajectory%f,-%f", x_min, x_max);
+    ROS_INFO("position x %f", pose.pose.position.x);
+    manipulator_group.setStartStateToCurrentState();
+    ROS_INFO("start pose seted");
+    manipulator_group.setPoseTarget(pose);
+    ROS_INFO("target pose seted");
+
+    for (int i = 0; i < 3; i++)
+    {
+      ROS_INFO("trajectory planning");
+      ret = manipulator_group.plan(plan);
+      if (ret)
+      {
+        moveit::planning_interface::MoveItErrorCode ret;
+        ROS_INFO("trajectory created");
+
+        ROS_INFO("execute plan");
+        ret = manipulator_group.execute(plan);
+        if (ret) 
+        {
+          TreateCall(view_pose.target_point);
+          ROS_INFO("sleep");
+          ros::Duration(1.0).sleep();
+          break;
+        }
+        else
+        {
+          ROS_WARN("Fail: %i", ret.val);
+        }
+      } else {
+        ROS_ERROR("can't make trajectory !!!!, skip plan this pose");
+        ROS_WARN("Fail: %i", ret.val);
+        if (i==2) // 3回失敗したら、散布したことにする。
+        {
+          TreateCall(view_pose.target_point);
+          ROS_INFO("sleep");
+          ros::Duration(1.0).sleep();
+        }
+      }
+    }
+  }
 }
 
 octomap::point3d ViewpointPlanner::sampleRandomPointOnSphere(const octomap::point3d &center, double radius)
@@ -2256,24 +2326,54 @@ bool ViewpointPlanner::moveArmCall(const double x_, const double y_)
   return true;
 }
 
+bool ViewpointPlanner::TreateCall(const geometry_msgs::Point target_point)
+{
+  treate_srv_.request.treated_point = target_point;
+        
+  if (treate_client_.call(treate_srv_))
+  {
+    // ROS_INFO("move xarm success!!");
+    return true;
+  }
+  else
+  {
+    ROS_ERROR("Failed to call service treate bunch");
+    return false;
+  }
+
+  return false;
+}
+
 void ViewpointPlanner::plannerLoop()
 {
   for (ros::Rate rate(100); ros::ok() && !shutdown_planner; rate.sleep())
   {
     plannerLoopOnce();
 
-    double x_posis = arm_pose_.position.x + 0.3;
-    double y_posis = arm_pose_.position.y;
+    ROS_INFO("3s sleep");
+    ros::Duration(3).sleep();
 
-    if (x_posis > 0.6) 
+    if (mode != IDLE)
     {
-      x_posis = -0.6;
-      y_posis = -y_posis;
-    }
+      execute();
 
-    ROS_INFO("call move arm");
-    if (moveArmCall(x_posis, y_posis))
-      ros::Duration(0.1).sleep();
+      // move to next point
+      double x_posis = arm_pose_.position.x + 0.3;
+      double y_posis = arm_pose_.position.y;
+
+      if (x_posis > 0.6) 
+      {
+        x_posis = -0.6;
+        y_posis = -y_posis;
+      }
+
+      ROS_INFO("call move arm");
+      if (moveArmCall(x_posis, y_posis))
+      {
+        ROS_INFO("3s sleep");
+        ros::Duration(3).sleep();
+      }
+    }
   }
 }
 
