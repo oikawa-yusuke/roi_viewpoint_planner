@@ -17,6 +17,7 @@
 #include <tf2_ros/message_filter.h>
 #include <tf2_sensor_msgs/tf2_sensor_msgs.h>
 //#include <moveit_msgs/PlanningScene.h>
+#include <moveit_msgs/CollisionObject.h>
 #include <sensor_msgs/CameraInfo.h>
 //#include <image_geometry/pinhole_camera_model.h>
 
@@ -26,6 +27,7 @@
 #include <moveit/robot_model_loader/robot_model_loader.h>
 #include <moveit/move_group_interface/move_group_interface.h>
 #include <moveit/planning_interface/planning_interface.h>
+#include <moveit/planning_scene_interface/planning_scene_interface.h>
 
 #include <eigen_conversions/eigen_msg.h>
 
@@ -42,6 +44,8 @@
 #include <view_pose_msgs/ViewPose.h>
 #include <view_pose_msgs/ViewPoseArray.h>
 #include "bunch_point_manager/TreateBunch.h"
+#include "bunch_point_manager/CantTreateBunch.h"
+#include "bunch_point_manager/TimeLogTrigger.h"
 
 #if defined(__GNUC__ ) && (__GNUC__  < 7) // GCC < 7 has sample only in experimental namespace
 #include <experimental/algorithm>
@@ -131,6 +135,7 @@ private:
   ros::Publisher workspaceTreePub;
   ros::Publisher samplingTreePub;
   ros::Publisher cubeVisPub;
+  bool obstacle;
   //ros::Publisher planningScenePub;
 
   ros::Publisher plannerStatePub;
@@ -146,9 +151,17 @@ private:
   ros::ServiceClient move_arm_client_;
   xarm6_planner::MoveXarmTrigger move_arm_srv_;
 
-  // treate bunch sdrvice
+  // treate bunch service
   ros::ServiceClient treate_client_;
   bunch_point_manager::TreateBunch treate_srv_;
+
+  // cant treate bunch service
+  ros::ServiceClient cant_treate_client_;
+  bunch_point_manager::CantTreateBunch cant_treate_srv_;
+
+  // time log trigger service
+  ros::ServiceClient time_log_client_;
+  bunch_point_manager::TimeLogTrigger time_log_srv_;
 
   std::string bag_write_filename;
   std::string bag_final_filename;
@@ -175,6 +188,7 @@ private:
   view_pose_msgs::ViewPoseArray target_poses_;
 
   moveit::planning_interface::MoveGroupInterface manipulator_group;
+  moveit::planning_interface::PlanningSceneInterface planning_scene_interface_;
 
   robot_model_loader::RobotModelLoader robot_model_loader;
   robot_model::RobotModelPtr kinematic_model;
@@ -188,6 +202,10 @@ private:
 
   std::string map_frame;
   std::string ws_frame;
+
+  // params
+  double process_range_x_;
+  geometry_msgs::PoseStamped ini_pose_;
 
   #ifdef PUBLISH_PLANNING_TIMES
   boost::mutex times_mtx;
@@ -299,7 +317,7 @@ public:
   // Planner parameters end
 
   ViewpointPlanner(ros::NodeHandle &nh, ros::NodeHandle &nhp, const std::string &wstree_file, const std::string &sampling_tree_file, double tree_resolution,
-                   const std::string &map_frame, const std::string &ws_frame, bool update_planning_tree=true, bool initialize_evaluator=true);
+                   const std::string &map_frame, const std::string &ws_frame, bool update_planning_tree=true, bool initialize_evaluator=true, std::string arm_group ="manipulator");
 
   ~ViewpointPlanner();
 
@@ -380,83 +398,46 @@ public:
   tf2::Quaternion dirVecToQuat(const octomath::Vector3 &dirVec, const tf2::Quaternion &camQuat, const tf2::Vector3 &viewDir);
 
   void publishViewpointVisualizations(const std::vector<Viewpoint> &viewpoints, const std::string &ns, const std_msgs::ColorRGBA &color = COLOR_RED);
-
   void saveViewpointsToBag(const std::vector<Viewpoint> &viewpoints, const std::string &sampling_method, const ros::Time &time);
-
   void sampleAroundROICenter(const octomap::point3d &center,  const octomap::point3d &camPos, const tf2::Quaternion &camQuat, size_t roiID = 0);
-
   double computeExpectedRayIGinSamplingTree(const octomap::KeyRay &ray);
-
   double computeViewpointSamplingValue(const octomap::pose6d &viewpoint, const double &hfov, size_t x_steps, size_t y_steps, const double &maxRange, bool use_roi_weighting = true);
-
   bool hasDirectUnknownNeighbour(const octomap::OcTreeKey &key, unsigned int depth = 0);
-
   bool hasUnknownNeighbour18(const octomap::OcTreeKey &key, unsigned int depth = 0);
-
   bool hasUnknownAndOccupiedNeighbour6(const octomap::OcTreeKey &key, unsigned int depth = 0);
-
   bool hasUnknownAndOccupiedNeighbour18(const octomap::OcTreeKey &key, unsigned int depth = 0);
-
   void visualizeBorderPoints(const octomap::point3d &pmin, const octomap::point3d &pmax, unsigned int depth = 0);
-
   octomap::point3d transformToMapFrame(const octomap::point3d &p);
   geometry_msgs::Pose transformToMapFrame(const geometry_msgs::Pose &p);
-
   octomap::point3d transformToWorkspace(const octomap::point3d &p);
   geometry_msgs::Pose transformToWorkspace(const geometry_msgs::Pose &p);
-
   octomap::point3d computeSurfaceNormalDir(const octomap::OcTreeKey &key);
-
   octomap::point3d computeUnknownDir(const octomap::OcTreeKey &key);
-
   void getFreeNeighbours6(const octomap::OcTreeKey &key, octomap::KeySet &freeKeys);
-
   std::vector<Viewpoint> sampleAroundMultiROICenters(const std::vector<octomap::point3d> &centers, const octomap::point3d &camPos, const tf2::Quaternion &camQuat);
-
   std::vector<Viewpoint> sampleContourPoints(const octomap::point3d &camPos, const tf2::Quaternion &camQuat);
-
   std::vector<Viewpoint> sampleRoiContourPoints(const octomap::point3d &camPos, const tf2::Quaternion &camQuat);
-
   std::vector<Viewpoint> sampleRoiAdjecentCountours(const octomap::point3d &camPos, const tf2::Quaternion &camQuat);
-
   std::vector<Viewpoint> sampleExplorationPoints(const octomap::point3d &camPos, const tf2::Quaternion &camQuat);
-
   std::vector<Viewpoint> sampleBorderPoints(const octomap::point3d &pmin, const octomap::point3d &pmax, const octomap::point3d &camPos, const tf2::Quaternion &camQuat);
-
   robot_state::RobotStatePtr sampleNextRobotState(const robot_state::JointModelGroup *joint_model_group, const robot_state::RobotState &current_state);
-
   bool moveToPoseCartesian(const geometry_msgs::Pose &goal_pose, bool async=false, bool safe=true);
-
   bool moveToPose(const geometry_msgs::Pose &goal_pose, bool async=false, bool safe=true);
-
   bool moveToState(const moveit::core::RobotStateConstPtr &goal_state, bool async=false, bool safe=true);
-
   bool moveToState(const std::vector<double> &joint_values, bool async=false, bool safe=true);
-
   bool planAndExecuteFromMoveGroup(bool async, bool safe);
-
   bool safeExecutePlan(const moveit::planning_interface::MoveGroupInterface::Plan &plan, bool async);
-
   bool executePlan(const moveit::planning_interface::MoveGroupInterface::Plan &plan, bool async);
-
   bool saveTreeAsObj(const std::string &file_name);
-
   bool saveROIsAsObj(const std::string &file_name);
-
   std::string saveOctomap(const std::string &name = "planningTree", bool name_is_prefix = true);
-
   int loadOctomap(const std::string &filename);
-
   void resetOctomap();
-
   bool randomizePlantPositions(const geometry_msgs::Point &min, const geometry_msgs::Point &max, double min_dist);
-
   bool moveArmCall(const double x_, const double y_);
-
   bool TreateCall(const geometry_msgs::Point target_point);
-
+  bool CantTreateCall(const geometry_msgs::Point target_point);
   void plannerLoop();
-
   bool plannerLoopOnce(); // returns true if moved
 };
 

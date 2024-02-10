@@ -14,11 +14,11 @@ namespace roi_viewpoint_planner
 {
 
 ViewpointPlanner::ViewpointPlanner(ros::NodeHandle &nh, ros::NodeHandle &nhp, const std::string &wstree_file, const std::string &sampling_tree_file, double tree_resolution,
-                                   const std::string &map_frame, const std::string &ws_frame, bool update_planning_tree, bool initialize_evaluator) :
+                                   const std::string &map_frame, const std::string &ws_frame, bool update_planning_tree, bool initialize_evaluator, std::string arm_group) :
   nh(nh), nhp(nhp),
   planningTree(new octomap_vpp::RoiOcTree(tree_resolution)),
   map_frame(map_frame),
-  ws_frame("arm_base_link"),
+  ws_frame(ws_frame),
   workspaceTree(nullptr),
   samplingTree(nullptr),
   evaluator(nullptr),
@@ -30,13 +30,14 @@ ViewpointPlanner::ViewpointPlanner(ros::NodeHandle &nh, ros::NodeHandle &nhp, co
   tfListener(tfBuffer),
   depthCloudSub(nh, PC_TOPIC, 1),
   tfCloudFilter(depthCloudSub, tfBuffer, map_frame, 100, nh),
-  manipulator_group("manipulator"),
+  manipulator_group(arm_group),
   robot_model_loader("robot_description"),
   kinematic_model(robot_model_loader.getModel()),
-  joint_model_group(kinematic_model->getJointModelGroup("manipulator")),
+  joint_model_group(kinematic_model->getJointModelGroup(arm_group)),
   kinematic_state(new robot_state::RobotState(kinematic_model)),
   mode(IDLE),
   loop_state(NORMAL),
+  obstacle(false),
   execute_plan(false),
   robotIsMoving(false),
   scanInserted(false),
@@ -46,10 +47,10 @@ ViewpointPlanner::ViewpointPlanner(ros::NodeHandle &nh, ros::NodeHandle &nhp, co
   eval_randomize_min(-1, -1, -0.1),
   eval_randomize_max(1, 1, 0.1),
   eval_randomize_dist(0.4),
+  process_range_x_(0.3),
   shutdown_planner(false),
   random_engine(std::random_device{}())
 {
-  // ws_frame = "arm_base_link";
 
   std::stringstream fDateTime;
   const boost::posix_time::ptime curDateTime = boost::posix_time::second_clock::local_time();
@@ -85,10 +86,16 @@ ViewpointPlanner::ViewpointPlanner(ros::NodeHandle &nh, ros::NodeHandle &nhp, co
   resetVoxbloxMapClient = nh.serviceClient<std_srvs::Empty>("/voxblox_node/clear_map");
 
   move_arm_client_ = nh.serviceClient<xarm6_planner::MoveXarmTrigger>("move_xarm");
-  arm_pose_.position.x = 0.0;
-  arm_pose_.position.y = -0.6;
+  nhp.param<double>("arm_position_x", arm_pose_.position.x, -0.6);
+  nhp.param<double>("arm_position_y", arm_pose_.position.y, -0.6);
 
   treate_client_ = nh.serviceClient<bunch_point_manager::TreateBunch>("bunch_point_manager/treate_bunch");
+  cant_treate_client_ = nh.serviceClient<bunch_point_manager::CantTreateBunch>("bunch_point_manager/cant_treate_bunch");
+  time_log_client_ = nh.serviceClient<bunch_point_manager::TimeLogTrigger>("bunch_point_manager/timelogger_trigger");
+
+  // update initial pose
+  ini_pose_ = manipulator_group.getCurrentPose();
+  ROS_INFO("ini_pose_ %s, %lf, %lf, %lf", ini_pose_.header.frame_id.c_str(), ini_pose_.pose.position.x, ini_pose_.pose.position.y, ini_pose_.pose.position.z);
 
   setPoseReferenceFrame(map_frame);
 
@@ -207,6 +214,57 @@ ViewpointPlanner::ViewpointPlanner(ros::NodeHandle &nh, ros::NodeHandle &nhp, co
     addCubeEdges(stMin, stMax, ws_cube.points);
 
     cubeVisPub.publish(ws_cube);
+  }
+
+  if (obstacle)
+  {
+    ROS_INFO("set manipulator workspace");
+    moveit_msgs::CollisionObject base;
+    base.header.frame_id = "platform";
+    base.id = "base";
+
+    shape_msgs::SolidPrimitive primitive;
+    primitive.type = primitive.BOX;
+    primitive.dimensions.resize(3);
+    primitive.dimensions[0] = 1.0;
+    primitive.dimensions[1] = 0.5;
+    primitive.dimensions[2] = 0.3;
+
+    geometry_msgs::Pose box_pose;
+    box_pose.orientation.w = 1.0;
+    box_pose.position.x = 0.0;
+    box_pose.position.y = 0.0;
+    box_pose.position.z = 0.15;
+
+    base.primitives.push_back(primitive);
+    base.primitive_poses.push_back(box_pose);
+    base.operation = base.ADD;
+
+    moveit_msgs::CollisionObject handle;
+    handle.header.frame_id = "platform";
+    handle.id = "handle";
+
+    primitive.type = primitive.BOX;
+    primitive.dimensions.resize(3);
+    primitive.dimensions[0] = 0.1;
+    primitive.dimensions[1] = 0.5;
+    primitive.dimensions[2] = 0.9;
+
+    box_pose.orientation.w = 1.0;
+    box_pose.position.x = (0.45 + 0.05);
+    box_pose.position.y = 0.0;
+    box_pose.position.z = primitive.dimensions[2]/2;
+
+    handle.primitives.push_back(primitive);
+    handle.primitive_poses.push_back(box_pose);
+    handle.operation = handle.ADD;
+
+    std::vector<moveit_msgs::CollisionObject> collision_objects;
+    collision_objects.push_back(base);
+    collision_objects.push_back(handle);
+
+    ROS_INFO("Add an object into the world");
+    planning_scene_interface_.addCollisionObjects(collision_objects);
   }
 
   if (update_planning_tree)
@@ -754,8 +812,8 @@ void ViewpointPlanner::ViewPoseCallback(const view_pose_msgs::ViewPoseArray& msg
 
 view_pose_msgs::ViewPoseArray ViewpointPlanner::SortViewpose(const view_pose_msgs::ViewPoseArray& msg)
 {
-  double x_min = arm_pose_.position.x - 0.15;
-  double x_max = arm_pose_.position.x + 0.15;
+  double x_min = arm_pose_.position.x - process_range_x_ / 2;
+  double x_max = arm_pose_.position.x + process_range_x_ / 2;
 
   // pose の整形 //
   view_pose_msgs::ViewPoseArray viewPoseArray;
@@ -776,11 +834,13 @@ view_pose_msgs::ViewPoseArray ViewpointPlanner::SortViewpose(const view_pose_msg
   sort(viewPoseArray.poses.begin(),viewPoseArray.poses.end(),[](const view_pose_msgs::ViewPose &alpha,const view_pose_msgs::ViewPose &beta){return alpha.view_pose.position.z > beta.view_pose.position.z;});
 
   // 確認のための表示
+  #ifdef DEBUG
   ROS_INFO("arm target points");
   for (size_t j = 0; j < viewPoseArray.poses.size(); j++)
   {
     ROS_INFO("x y z %f %f %f", viewPoseArray.poses[j].view_pose.position.x, viewPoseArray.poses[j].view_pose.position.y, viewPoseArray.poses[j].view_pose.position.z);
   }
+  #endif
 
   return viewPoseArray;
 }
@@ -797,8 +857,8 @@ void ViewpointPlanner::execute()
     target_poses.poses.push_back(pose);
   }
 
-  double x_min = arm_pose_.position.x - 0.15;
-  double x_max = arm_pose_.position.x + 0.15;
+  double x_min = arm_pose_.position.x - process_range_x_ / 2;
+  double x_max = arm_pose_.position.x + process_range_x_ / 2;
 
   for (int j=0; j < target_poses.poses.size(); j++)
   {
@@ -817,38 +877,30 @@ void ViewpointPlanner::execute()
     manipulator_group.setPoseTarget(pose);
     ROS_INFO("target pose seted");
 
-    for (int i = 0; i < 3; i++)
+    ROS_INFO("trajectory planning");
+    ret = manipulator_group.plan(plan);
+    if (ret)
     {
-      ROS_INFO("trajectory planning");
-      ret = manipulator_group.plan(plan);
-      if (ret)
-      {
-        moveit::planning_interface::MoveItErrorCode ret;
-        ROS_INFO("trajectory created");
+      moveit::planning_interface::MoveItErrorCode ret;
+      ROS_INFO("trajectory created");
 
-        ROS_INFO("execute plan");
-        ret = manipulator_group.execute(plan);
-        if (ret) 
-        {
-          TreateCall(view_pose.target_point);
-          ROS_INFO("sleep");
-          ros::Duration(1.0).sleep();
-          break;
-        }
-        else
-        {
-          ROS_WARN("Fail: %i", ret.val);
-        }
-      } else {
-        ROS_ERROR("can't make trajectory !!!!, skip plan this pose");
-        ROS_WARN("Fail: %i", ret.val);
-        if (i==2) // 3回失敗したら、散布したことにする。
-        {
-          TreateCall(view_pose.target_point);
-          ROS_INFO("sleep");
-          ros::Duration(1.0).sleep();
-        }
+      ROS_INFO("execute plan");
+      ret = manipulator_group.execute(plan);
+      if (ret) 
+      {
+        TreateCall(view_pose.target_point);
+        ROS_INFO("sleep");
+        ros::Duration(1.0).sleep();
+        continue;
       }
+      else
+      {
+        ROS_WARN("Fail: %i", ret.val);
+      }
+    } else {
+      ROS_ERROR("can't make trajectory !!!!, skip plan this pose");
+      ROS_WARN("Fail: %i", ret.val);
+      CantTreateCall(view_pose.target_point);
     }
   }
 }
@@ -1154,7 +1206,53 @@ double ViewpointPlanner::computeExpectedRayIGinSamplingTree(const octomap::KeyRa
     }
     double occ = node->getOccupancy();
     if (occ > 0.6) // View is blocked
-    {
+    {ROS_INFO("set manipulator workspace");
+    moveit_msgs::CollisionObject base;
+    base.header.frame_id = "platform";
+    base.id = "base";
+
+    shape_msgs::SolidPrimitive primitive;
+    primitive.type = primitive.BOX;
+    primitive.dimensions.resize(3);
+    primitive.dimensions[0] = 0.5;
+    primitive.dimensions[1] = 1.0;
+    primitive.dimensions[2] = 0.3;
+
+    geometry_msgs::Pose box_pose;
+    box_pose.orientation.w = 0.9;
+    box_pose.position.x = 0.0;
+    box_pose.position.y = 0.0;
+    box_pose.position.z = 0.15;
+
+    base.primitives.push_back(primitive);
+    base.primitive_poses.push_back(box_pose);
+    base.operation = base.ADD;
+
+    moveit_msgs::CollisionObject handle;
+    handle.header.frame_id = "platform";
+    handle.id = "handle";
+
+    primitive.type = primitive.BOX;
+    primitive.dimensions.resize(3);
+    primitive.dimensions[0] = 0.5;
+    primitive.dimensions[1] = 0.1;
+    primitive.dimensions[2] = 0.9;
+
+    box_pose.orientation.w = 1.0;
+    box_pose.position.x = 0.0;
+    box_pose.position.y = -(0.45 + 0.05);
+    box_pose.position.z = primitive.dimensions[2]/2;
+
+    handle.primitives.push_back(primitive);
+    handle.primitive_poses.push_back(box_pose);
+    handle.operation = handle.ADD;
+
+    std::vector<moveit_msgs::CollisionObject> collision_objects;
+    collision_objects.push_back(base);
+    collision_objects.push_back(handle);
+
+    ROS_INFO("Add an object into the world");
+    planning_scene_interface_.addCollisionObjects(collision_objects);
       break;
     }
     else if (occ > 0.4) // unknown
@@ -2344,20 +2442,128 @@ bool ViewpointPlanner::TreateCall(const geometry_msgs::Point target_point)
   return false;
 }
 
+bool ViewpointPlanner::CantTreateCall(const geometry_msgs::Point target_point)
+{
+  cant_treate_srv_.request.treate_point = target_point;
+        
+  if (cant_treate_client_.call(cant_treate_srv_))
+  {
+    // ROS_INFO("move xarm success!!");
+    return true;
+  }
+  else
+  {
+    ROS_ERROR("Failed to call service treate bunch");
+    return false;
+  }
+
+  return false;
+}
+
 void ViewpointPlanner::plannerLoop()
 {
+  time_log_srv_.request.trigger = true;
+  if(time_log_client_.call(time_log_srv_))
+    ROS_INFO("Started time logger");
+  else
+    ROS_ERROR("Failed to start time logger");
+
   for (ros::Rate rate(100); ros::ok() && !shutdown_planner; rate.sleep())
   {
-    plannerLoopOnce();
-
-    ROS_INFO("3s sleep");
-    ros::Duration(3).sleep();
-
     if (mode != IDLE)
     {
+      // move to search pose
+      // geometry_msgs::PoseStamped pose;
+      // tf2::Quaternion quaternion;
+      // arm_pose_.position.y < 0 ? quaternion.setRPY(0, -M_PI/2, -M_PI/2) : quaternion.setRPY(0, -M_PI/2, M_PI/2);
+      // quaternion=quaternion.normalize();
+      // pose.header.frame_id = "world";
+      // pose.header.stamp = ros::Time::now();
+      // pose.pose.orientation.x = quaternion.x();
+      // pose.pose.orientation.y = quaternion.y();
+      // pose.pose.orientation.z = quaternion.z();
+      // pose.pose.orientation.w = quaternion.w();
+      // pose.pose.position.x = arm_pose_.position.x;
+      // pose.pose.position.y = arm_pose_.position.y - 0.2;
+      // pose.pose.position.z = 1.0;
+
+      // moveit::planning_interface::MoveGroupInterface::Plan plan;
+      // moveit::planning_interface::MoveItErrorCode ret;
+
+      // ROS_INFO("position x %f", pose.pose.position.x);
+      // manipulator_group.setStartStateToCurrentState();
+      // ROS_INFO("start pose seted");
+      // manipulator_group.setPoseTarget(pose);
+      // ROS_INFO("target pose seted");
+      // ret = manipulator_group.plan(plan);
+      // if (ret)
+      // {
+      //   moveit::planning_interface::MoveItErrorCode ret;
+      //   ROS_INFO("initial pose target trajectory created");
+      //   ROS_INFO("execute plan");
+      //   ret = manipulator_group.execute(plan);
+      //   if (ret) 
+      //   {
+      //   }
+      //   else
+      //   {
+      //     ROS_WARN("Fail: %i", ret.val);
+      //   }
+      // }
+
+      // ROS_INFO("sleep");
+      // ros::Duration(10).sleep();
+
+      // sleep 10 seconds
+
+      plannerLoopOnce();
+
+      ROS_INFO("3s sleep");
+      ros::Duration(3).sleep();
+
       execute();
 
+      // move to search pose
+      ROS_INFO("Move to search pose");
+      
+      // set target pose
+      geometry_msgs::PoseStamped pose = ini_pose_;
+      pose.header.frame_id = "world";
+      pose.header.stamp = ros::Time::now();
+
+      ROS_INFO("position x %f", pose.pose.position.x);
+      manipulator_group.setStartStateToCurrentState();
+      ROS_INFO("start pose seted");
+      manipulator_group.setPoseTarget(pose);
+      ROS_INFO("target pose seted");
+
+      moveit::planning_interface::MoveGroupInterface::Plan plan;
+      moveit::planning_interface::MoveItErrorCode ret;
+
+      ret = manipulator_group.plan(plan);
+      if (ret)
+      {
+        moveit::planning_interface::MoveItErrorCode ret;
+        ROS_INFO("search pose target trajectory created");
+
+        ROS_INFO("execute plan");
+        ret = manipulator_group.execute(plan);
+        if (ret) 
+        {
+          ROS_INFO("Moved search pose.");
+        }
+        else
+        {
+          ROS_WARN("Fail: %i", ret.val);
+        }
+      }
+
       // move to next point
+      if (arm_pose_.position.x == 0.6 && arm_pose_.position.y == 0.6)
+      {
+        shutdown_planner = true;
+        break;
+      }
       double x_posis = arm_pose_.position.x + 0.3;
       double y_posis = arm_pose_.position.y;
 
@@ -2370,11 +2576,21 @@ void ViewpointPlanner::plannerLoop()
       ROS_INFO("call move arm");
       if (moveArmCall(x_posis, y_posis))
       {
-        ROS_INFO("3s sleep");
-        ros::Duration(3).sleep();
+        ROS_INFO("10s sleep");
+        ros::Duration(10).sleep();
+
+        // update initial pose
+        ini_pose_ = manipulator_group.getCurrentPose();
+        ROS_INFO("ini_pose_ %s, %lf, %lf, %lf", ini_pose_.header.frame_id.c_str(), ini_pose_.pose.position.x, ini_pose_.pose.position.y, ini_pose_.pose.position.z);
       }
     }
   }
+
+  time_log_srv_.request.trigger = false;
+  if(time_log_client_.call(time_log_srv_))
+    ROS_INFO("Stop time logger");
+  else
+    ROS_ERROR("Failed to stop time logger");
 }
 
 bool ViewpointPlanner::plannerLoopOnce()
